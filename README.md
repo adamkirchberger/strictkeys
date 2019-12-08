@@ -12,9 +12,14 @@ This tool came about to address the need in an Ansible project I'm working on to
 
 ## How can I use it?
 
-### Clone the repo
+### Install
 
-Start by cloning this repo
+Using pip
+```
+pip3 install git+https://github.com/avkirch/strictkeys.git
+```
+
+Using git
 ```
 git clone git@github.com:avkirch/strictkeys.git
 ```
