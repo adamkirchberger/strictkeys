@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+
+import os
+import sys
+import yaml
+import logging
+import argparse
+
+# Global constants
+LOG = logging.getLogger(__name__)
+CWD = os.getcwd()
+
+# Global variables
+filespath = None
+
+
+def get_args():
+    formatter = lambda prog: argparse.HelpFormatter(prog, max_help_position=79)
+    parser = argparse.ArgumentParser(
+        formatter_class=formatter,
+        description=('Tool for ensuring that only allowed variables are '
+                     'present in files and directories')
+    )
+    parser.add_argument(
+        '-d', '--debug',
+        help='Enable Debug',
+        action='store_true'
+    )
+    parser.add_argument(
+        '-c', '--config',
+        help='Config file',
+        metavar='FILEPATH',
+        required=True,
+        type=str
+    )
+    parser.add_argument(
+        'filespath',
+        help='Files',
+        type=str
+    )
+    return parser.parse_args()
+
+
+class Rule(object):
+    def __init__(self, path, keys):
+        self.path = path
+        self.keys = keys
+        self._check_is_valid()
+
+    @property
+    def fullpath(self):
+        global filespath
+        return os.path.join(filespath, self.path)
+
+    def _check_is_valid(self):
+        wcards = self.path.count('*')
+        if wcards > 1:
+            raise ValueError(f'found {wcards} wildcards, expected 1 or 0.')
+
+        if not isinstance(self.keys, list):
+            raise TypeError(
+                f'found keys of type {type(self.keys).__name__} expected list.'
+            )
+
+    def check_filepath_match(self, filepath):
+        # Full match
+        if filepath == self.fullpath:
+            return True
+
+        # Wildcard match
+        elif '*' in self.fullpath:
+            parts = self.fullpath.split('*')
+
+            # Match start
+            if len(parts) == 1 and filepath.startswith(parts[0]):
+                return True
+            # Match start and end
+            elif len(parts) == 2 and filepath.startswith(parts[0]) and \
+                    filepath.endswith(parts[1]):
+                return True
+
+        return False
+
+    def get_denied_keys(self, filepath):
+        denied_keys = []
+        try:
+            input_file = yaml.safe_load(open(filepath, 'r'))
+            for key in input_file.keys():
+                if key not in self.keys:
+                    denied_keys.append(key)
+
+        except Exception as e:
+            raise Exception(f'file `{filepath}` ensure YAML or JSON: {e}')
+
+        return denied_keys
+
+    def __str__(self):
+        return (
+            f'Rule: path={self.path} keys=[{", ".join(self.keys)}]'
+        )
+
+
+class Rules(object):
+    def __init__(self, config_filepath):
+        self.config = Config(config_filepath)
+        self._rules = self._build_rules()
+
+    def _build_rules(self):
+        new_rules = []
+        LOG.debug('build rules: start')
+        for rpath in sorted(self.config.rules, key=len, reverse=True):
+            try:
+                new_rule = Rule(rpath, keys=self.config.rules.get(rpath))
+                new_rules.append(new_rule)
+            except Exception as e:
+                raise TypeError(f'build rules: path=`{rpath}` {e} - skipping')
+
+        LOG.debug(f'build rules: finished')
+        LOG.debug(f'build rules: loaded {len(new_rules)} rules')
+        return new_rules
+
+    def get_rules(self):
+        return self._rules
+
+    def get_total_rules(self):
+        return len(self._rules)
+
+
+class Config(object):
+    def __init__(self, filepath):
+        self.filepath = filepath
+        self.settings = self._load_config()
+
+    def _load_config(self):
+        LOG.debug(f'open config file `{self.filepath}`')
+        try:
+            return yaml.safe_load(open(self.filepath, 'r'))
+        except FileNotFoundError as e:
+            raise FileNotFoundError(f'config file not found: {e}')
+        except Exception as e:
+            raise Exception(f'unable to open config, ensure YAML or JSON: {e}')
+
+    @property
+    def rules(self):
+        try:
+            return self.settings['rules']
+        except KeyError:
+            raise KeyError('config has no rules defined')
+
+
+class fmt:
+    RED = '\033[31m'
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+
+
+def main():
+    # Load args
+    args = get_args()
+    global filespath
+    filespath = args.filespath
+
+    # Logging settings
+    if args.debug:
+        log_level = logging.DEBUG
+    else:
+        log_level = logging.INFO
+    formatter = '%(asctime)s - %(levelname)s - %(message)s'
+    logging.basicConfig(level=log_level, format=formatter)
+
+    # Read config and build rules
+    try:
+        rules = Rules(config_filepath=args.config)
+    except Exception as e:
+        LOG.error(e)
+        sys.exit(1)
+
+    # Fill list of input files
+    input_files = []
+    for root, dirs, files in os.walk(args.filespath):
+        input_files.extend([os.path.join(root, file) for file in files])
+
+    # Check input files for rule matches
+    allowed = True
+    for file in input_files:
+        for rule in rules.get_rules():
+            if rule.check_filepath_match(file):
+                # Check for denied keys
+                try:
+                    denied_keys = rule.get_denied_keys(file)
+                except Exception as e:
+                    LOG.debug(e)
+                    continue
+
+                # Display files with denied keys
+                if len(denied_keys) > 0:
+                    print(fmt.UNDERLINE + f'{file}' + fmt.RESET)
+                    print(f'  Rule: `{rule.path}`')
+                    print(f'  Denied Keys: ({len(denied_keys)})')
+                    for key in denied_keys:
+                        print(f'    * `{fmt.RED}{key}{fmt.RESET}`')
+                    allowed = False
+                    print('')
+
+                # Only match one rule
+                break
+
+    if allowed:
+        return sys.exit(0)
+    return sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()
